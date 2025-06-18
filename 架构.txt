@@ -1,0 +1,59 @@
+Web Worker、Message Channel、WebAssembly（c、c++、Rust）、useTranstion 多信道优先级（功能开发
+技术栈整合
+结合 WebWorker、MessageChannel、WebAssembly、 与 React useTransition，构建高性能合约交易前端。
+整体架构设计
+1. 多线程模型
+Worker线程：
+- MarketDataWorker：处理价格和行情数据（直接建立WebSocket连接）
+- ChartWorker：K线计算和技术指标处理
+- OrderBookWorker：订单簿和深度图处理
+- TradeWorker：交易执行和订单管理
+- RiskWorker：风险计算和保证金监控
+2. 通信架构
+使用MessageChannel建立Worker间高效通信：
+- MarketDataWorker → ChartWorker：价格和K线数据直接流动
+- MarketDataWorker → OrderBookWorker：行情数据流向订单簿处理
+- TradeWorker ↔ RiskWorker：交易风险评估
+- 所有Worker → 主线程：UI更新数据
+优化策略：
+- 共享内存模型：对于频繁使用的大型数据（如订单簿），使用 SharedArrayBuffer 在多个 Worker 间共享，减少拷贝。
+- 任务分片执行：将大任务（如指标计算）拆分成小块，分批次执行，避免线程阻塞。
+- 使用 setTimeout 或 setInterval 分片将任务拆分成小块，每块任务之间通过 setTimeout 或 setInterval 延时执行，从而让出主线程。
+- 比如行情数据或者订单薄的数据处理
+4. React并发特性集成
+根据任务优先级决定是否使用useTransition：
+- 关键更新（价格、订单状态）：直接更新
+- 非关键更新（图表、订单簿、资产）：使用useTransition
+具体实现策略
+1. 价格和订单处理流（增量更新、原子化state）
+高优先级流程：
+1.MarketDataWorker接收价格WebSocket数据
+2.WebAssembly快速处理价格信息
+3.直接通过MessageChannel推送到其他Worker
+4.同时发送到主线程更新UI
+5.主线程立即更新价格（不使用useTransition）
+2. 图表和指标计算流
+中优先级流程：
+1.ChartWorker 接收 K 线数据和实时价格。
+2.使用 WebAssembly 计算技术指标（MACD、RSI等）。
+3.结果通过 MessageChannel 返回主线程。
+4.主线程使用 useTransition 更新图表。
+优化策略：
+- 并行指标计算：将多个技术指标拆分为独立任务，分布到不同 Worker 中并行处理。
+- 按需计算：仅对当前视口范围内的 K 线计算指标，减少无用计算。
+- 指标结果缓存：缓存已计算的指标，避免重复计算。
+3. 订单簿和深度图流
+混合优先级流程：
+1.OrderBookWorker接收订单簿数据
+2.处理增量更新并聚合深度
+3.精简后的关键价位信息（高优先级）直接更新
+4.完整深度图（中优先级）通过useTransition更新
+5.虚拟滚动渲染
+4. 交易执行流
+交互优先流程：
+1.用户提交订单请求
+2.本地参数验证
+3.发送到TradeWorker处理
+4.TradeWorker请求RiskWorker评估风险
+5.确认安全后执行交易
+6.UI立即反馈订单状态

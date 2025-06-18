@@ -1,0 +1,83 @@
+1. 范围与目标
+设计一个生产级别的 React + TypeScript 单页面应用程序 (SPA)，该应用程序允许用户监控并交易一小部分加密货币对（例如：BTC/USDT、ETH/USDT、SOL/USDT）。核心用户界面需要嵌入 TradingView 的 Charting Library（不是轻量级小部件），并通过公共交易所 WebSocket 流式传输实时数据（可以使用 Binance Spot API）。这个任务的范围是经过精心设计的，目的是让你能够在大约 12-16 小时的专注工作中完成一个稳健的 MVP，同时展示架构深度、代码质量和性能工程。
+
+2. 功能需求
+交易对选择器
+一个下拉菜单，至少包含三个现货交易对。
+切换交易对时，必须即时更新所有依赖组件（图表、订单簿、行情、盈亏）而不进行完全重新加载。
+TradingView K线图
+通过 npm 或本地构建集成 TradingView 的 Charting Library。
+显示 1 分钟、5 分钟、1 小时、4 小时和 1 天的 K 线图。当时间周期变化时，需通过 REST 获取历史数据，并恢复 WebSocket 流式更新。
+使用库的 API 添加至少一个自定义覆盖图（例如 VWAP 或 9 周期的 EMA）。
+实时订单簿
+显示前 20 条买单/卖单，按最近的最小价格单位聚合。
+更新推送渲染频率需达到 ≥5 Hz，并使用节流或 requestAnimationFrame 确保 UI 保持 >60 FPS。
+使用滚动虚拟化或行记忆化——展现你对 React 列表在大规模数据下性能瓶颈的理解。
+交易表单（限价单）
+包含价格、数量、方向以及“仅挂单”开关。
+客户端验证；实时反映当前的最佳买价/卖价。
+模拟本地接受订单（无需私钥签名），并在 <250 毫秒内通过 toast 提示订单状态（“已接受”或“已拒绝”）。
+持仓与盈亏组件
+一个简单的表格，显示未平仓订单和按现价计算的浮动盈亏。
+使用 localStorage 持久化数据，以便刷新页面后恢复状态。
+连接的稳定性
+实现自动重连，支持指数退避机制。
+在图表重连时队列化未处理的数据，并快速补发。
+3. 技术要求
+工具链
+
+使用 React 18、TypeScript ≥ 5.3 和 Vite 4（或 Next.js 14 的 app-router）。
+状态管理层可以选择 Redux Toolkit、Recoil 或 Zustand，但需要用架构决策记录（ADR）来说明你的选择理由。
+配置严格的 ESLint + Prettier + typescript-eslint，并通过 Husky 实现 pre-commit 钩子。
+数据层
+
+抽象交易所的具体实现，定义一个 ExchangeAdapter 接口。提供一个具体的 Binance 实现。如果能再实现一个 Bybit 的适配器（即 BybitAdapter），将会获得加分。
+使用 Web Worker 处理繁重的价格聚合和盈亏计算，避免阻塞主线程。
+性能
+
+在 4× CPU 降频和 3G 网络下，首屏内容渲染时间（First Contentful Paint） ≤ 1.5 秒（可通过 npm run lighthouse 测试）。
+确保没有 React 渲染超过 16 毫秒（使用 Chrome DevTools Flamegraph 检查）。
+可访问性和用户体验
+
+控件支持键盘导航，表格需要添加 ARIA roles，支持 prefers-color-scheme（深色/浅色主题）。
+界面需响应式，最小支持 390 px 宽度（适配手机横屏）。
+测试
+
+使用 Vitest 或 Jest + React Testing Library，单元测试覆盖率 ≥ 80%。
+编写至少一个 Playwright E2E 测试用例，验证订单成功显示在持仓组件中。
+安全性
+
+使用 CSP（内容安全策略）meta 标签，为 TradingView 的嵌入 iframe 添加 sandbox 属性，禁止 unsafe-eval。
+对所有用户输入进行清理，即使订单提交是模拟的。
+4. 交付物
+GitHub 仓库（可以是公开的，也可以私有邀请），目录结构如下：
+
+jboss-cli
+
+复制
+/src
+  /adapters         # 交易所适配器
+  /components       # 组件
+  /hooks            # 自定义钩子
+  /pages            # 页面
+  /workers          # Web Worker 文件
+  ...
+/docs
+  ADR-0001-state-layer.md  # 状态管理层的架构决策记录
+README 文件包含：
+
+用于一键部署到 Vercel（或 Netlify）的徽章。
+快速启动说明：pnpm i && pnpm dev。
+架构图（文本 + Mermaid 或 PNG 格式）。
+自动化 CI（GitHub Actions）：
+
+运行代码检查（lint）、类型检查（type-check）、单元测试、Lighthouse CLI 性能测试以及 Playwright 端到端测试。
+简短的 Loom 视频（≤5 分钟）：
+
+展示技术决策、遇到的难点以及后续改进方向。
+5. 进阶目标
+自定义 Pine Script 指标：将自定义的 Pine Script 指标注入到 TradingView 实例中。
+深度图：显示聚合订单簿的区域填充图表。
+拖放布局：使用 react-grid-layout 实现拖放式布局，并持久化用户的布局偏好。
+服务端事件中继：使用一个小型 Fastify Node 服务，将多个交易所的流数据合并为一个流。
+渐进式 Web 应用（PWA）：支持离线缓存历史 K 线数据和安装提示。
