@@ -20,10 +20,7 @@ export async function testWebSocketConnection() {
     });
 
     marketDataService.addListener("orderbook", (data) => {
-      console.log(
-        "Orderbook data received:",
-        `bids: ${data.bids.length}, asks: ${data.asks.length}`,
-      );
+      console.log("Orderbook data received:", data);
     });
 
     marketDataService.addListener("klines", (data) => {

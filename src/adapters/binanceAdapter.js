@@ -28,7 +28,7 @@ export class BinanceAdapter extends BaseExchangeAdapter {
    */
   formatMarket(market) {
     // 将 BTC/USDT 转换为 BTCUSDT
-    return market.replace("/", "");
+    return market.replace("/", "").toUpperCase();
   }
 
   /**
@@ -154,30 +154,111 @@ export class BinanceAdapter extends BaseExchangeAdapter {
    */
   createOrderbookStream(market, onMessage, onError) {
     const binanceMarket = this.formatMarket(market).toLowerCase();
-    const wsUrl = `${this.wsBaseUrl}/${binanceMarket}@depth@100ms`;
+
+    // 修改 WebSocket URL 使用 "depth" 而非 "depth@100ms"
+    // 使用标准的订单簿增量更新，不要使用 100ms 的高频更新
+    const wsUrl = `${this.wsBaseUrl}/${binanceMarket}@depth`;
+
+    console.log(`Creating orderbook stream: ${wsUrl}`);
 
     const ws = new ReconnectingWebSocket(wsUrl);
+
+    // 用于存储完整订单簿的状态
+    let orderbook = {
+      bids: [],
+      asks: [],
+      timestamp: Date.now(),
+    };
+
+    // 先获取一次完整的订单簿快照
+    this.getOrderbook(market)
+      .then((snapshot) => {
+        orderbook = snapshot;
+        console.log(
+          `Initial orderbook snapshot received with ${orderbook.bids.length} bids and ${orderbook.asks.length} asks`,
+        );
+
+        // 发送初始快照
+        onMessage(orderbook);
+      })
+      .catch((err) => {
+        console.error("Failed to fetch initial orderbook snapshot:", err);
+        if (onError) onError(err);
+      });
 
     ws.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
 
-        // 转换为统一格式
-        const orderbook = {
-          bids:
-            data.bids?.map((item) => [
-              parseFloat(item[0]),
-              parseFloat(item[1]),
-            ]) || [],
-          asks:
-            data.asks?.map((item) => [
-              parseFloat(item[0]),
-              parseFloat(item[1]),
-            ]) || [],
-          timestamp: data.E || Date.now(),
-        };
+        // 检查数据格式
+        if (!data.b && !data.a) {
+          console.warn(
+            "Received orderbook data without bids (b) or asks (a):",
+            data,
+          );
+          return;
+        }
 
-        onMessage(orderbook);
+        // 更新订单簿
+        if (data.b && data.b.length > 0) {
+          // 处理买单更新
+          data.b.forEach((item) => {
+            const price = parseFloat(item[0]);
+            const amount = parseFloat(item[1]);
+
+            // 如果数量为0，则删除此价格档位
+            if (amount === 0) {
+              orderbook.bids = orderbook.bids.filter((bid) => bid[0] !== price);
+            } else {
+              // 更新或添加此价格档位
+              const existingIndex = orderbook.bids.findIndex(
+                (bid) => bid[0] === price,
+              );
+              if (existingIndex !== -1) {
+                orderbook.bids[existingIndex] = [price, amount];
+              } else {
+                orderbook.bids.push([price, amount]);
+                // 保持价格降序排列（最高买价在前）
+                orderbook.bids.sort((a, b) => b[0] - a[0]);
+              }
+            }
+          });
+        }
+
+        if (data.a && data.a.length > 0) {
+          // 处理卖单更新
+          data.a.forEach((item) => {
+            const price = parseFloat(item[0]);
+            const amount = parseFloat(item[1]);
+
+            // 如果数量为0，则删除此价格档位
+            if (amount === 0) {
+              orderbook.asks = orderbook.asks.filter((ask) => ask[0] !== price);
+            } else {
+              // 更新或添加此价格档位
+              const existingIndex = orderbook.asks.findIndex(
+                (ask) => ask[0] === price,
+              );
+              if (existingIndex !== -1) {
+                orderbook.asks[existingIndex] = [price, amount];
+              } else {
+                orderbook.asks.push([price, amount]);
+                // 保持价格升序排列（最低卖价在前）
+                orderbook.asks.sort((a, b) => a[0] - b[0]);
+              }
+            }
+          });
+        }
+
+        // 更新时间戳
+        orderbook.timestamp = data.E || Date.now();
+
+        // 限制订单簿大小，只保留前20个价格档位
+        orderbook.bids = orderbook.bids.slice(0, 20);
+        orderbook.asks = orderbook.asks.slice(0, 20);
+
+        // 发送更新后的订单簿
+        onMessage({ ...orderbook });
       } catch (error) {
         console.error("Error parsing Binance orderbook message:", error);
         if (onError) onError(error);

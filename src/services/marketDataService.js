@@ -1,13 +1,14 @@
 // src/services/marketDataService.js
 import adapterFactory from "../adapters/adapterFactory";
+import workerManager from "./WorkerManager";
 
 /**
  * 市场数据服务
- * 管理WebSocket连接和数据获取
+ * 管理 WebSocket 连接、数据获取和 Worker 通信
  */
 class MarketDataService {
   constructor() {
-    // WebSocket连接
+    // WebSocket 连接
     this.connections = {
       ticker: null,
       orderbook: null,
@@ -25,6 +26,7 @@ class MarketDataService {
       orderbook: new Set(),
       klines: new Set(),
       connectionStatus: new Set(),
+      processedData: new Set(),
     };
 
     // 连接状态
@@ -33,22 +35,196 @@ class MarketDataService {
       orderbook: "closed",
       klines: "closed",
     };
+
+    // Worker 相关
+    this.marketWorker = null;
+    this.marketPort = null;
+    this.workersReady = {
+      market: false,
+      ticker: false,
+      orderbook: false,
+      klines: false,
+    };
   }
 
   /**
-   * 初始化交易所适配器
-   * @param {string} exchangeId - 交易所ID
+   * 初始化交易所适配器和 Worker
+   * @param {string} exchangeId - 交易所 ID
    * @returns {boolean} - 是否初始化成功
    */
   initialize(exchangeId = "binance") {
     try {
+      // 初始化适配器
       this.adapter = adapterFactory.getAdapter(exchangeId);
       console.log(`MarketDataService initialized with ${exchangeId} adapter`);
+
+      // 初始化 Worker 架构
+      this.initializeWorkers();
+
       return true;
     } catch (error) {
       console.error("Failed to initialize adapter:", error);
       return false;
     }
+  }
+
+  /**
+   * 初始化 Worker 架构
+   */
+  initializeWorkers() {
+    try {
+      console.log("Initializing worker architecture...");
+
+      // 1. 创建 MarketWorker（主 Worker）
+      const { worker: marketWorker, port: marketPort } =
+        workerManager.createWorker(
+          "market",
+          "../workers/MarketWorker.js",
+          "main",
+        );
+
+      this.marketWorker = marketWorker;
+      this.marketPort = marketPort;
+
+      // 设置主 Worker 消息处理
+      this.marketPort.onmessage = this.handleMarketWorkerMessage.bind(this);
+      this.marketPort.start();
+
+      // 2. 创建专业 Worker
+      const { worker: tickerWorker } = workerManager.createWorker(
+        "ticker",
+        "../workers/TickerWorker.js",
+      );
+
+      const { worker: orderbookWorker } = workerManager.createWorker(
+        "orderbook",
+        "../workers/OrderbookWorker.js",
+      );
+
+      const { worker: klinesWorker } = workerManager.createWorker(
+        "klines",
+        "../workers/KlinesWorker.js",
+      );
+
+      // 3. 连接 Worker
+      workerManager.connectWorkers("market", "ticker", "data");
+      workerManager.connectWorkers("market", "orderbook", "data");
+      workerManager.connectWorkers("market", "klines", "data");
+
+      console.log("Worker architecture initialized");
+    } catch (error) {
+      console.error("Failed to initialize workers:", error);
+      throw error;
+    }
+  }
+
+  /**
+   * 处理来自 MarketWorker 的消息
+   * @param {MessageEvent} event 消息事件
+   */
+  handleMarketWorkerMessage(event) {
+    const { type, dataType, data, workerType, subType } = event.data;
+
+    switch (type) {
+      case "WORKER_READY":
+        this.handleWorkerReady(workerType);
+        break;
+
+      case "PROCESSED_DATA":
+        this.handleProcessedData(dataType, data, subType);
+        break;
+
+      case "WORKER_ERROR":
+        console.error(`Error in ${workerType} worker:`, event.data.error);
+        // 可以实现错误重试策略或通知用户
+        break;
+
+      case "WORKER_PONG":
+        // 处理心跳响应，可用于监控 Worker 健康状态
+        console.log(
+          `Worker ${workerType} responded in ${Date.now() - event.data.timestamp}ms`,
+        );
+        break;
+
+      case "WORKER_STATUS_RESPONSE":
+        // 处理 Worker 状态响应
+        console.log("Worker status:", event.data.status);
+        break;
+
+      default:
+        console.log("Unknown message from MarketWorker:", event.data);
+    }
+  }
+
+  /**
+   * 处理 Worker 就绪消息
+   * @param {string} workerType Worker 类型
+   */
+  handleWorkerReady(workerType) {
+    console.log(`${workerType} worker is ready`);
+
+    this.workersReady[workerType] = true;
+
+    // 检查是否所有 Worker 都准备好了
+    const allReady = Object.values(this.workersReady).every((ready) => ready);
+
+    if (allReady) {
+      console.log("All workers are ready");
+      this._notifyListeners("connectionStatus", {
+        workers: "ready",
+        status: this.workersReady,
+      });
+    }
+  }
+
+  /**
+   * 处理处理后的数据
+   * @param {string} dataType 数据类型
+   * @param {Object} data 处理后的数据
+   * @param {string} subType 数据子类型
+   */
+  handleProcessedData(dataType, data, subType) {
+    // 通知监听器
+    this._notifyListeners("processedData", {
+      type: dataType,
+      data,
+      subType,
+    });
+
+    // 同时通知特定类型的监听器
+    if (dataType === "ticker") {
+      this._notifyListeners("ticker", data);
+    } else if (dataType === "orderbook") {
+      this._notifyListeners("orderbook", data);
+    } else if (dataType === "klines") {
+      this._notifyListeners("klines", {
+        data,
+        timeframe: event.data.timeframe,
+        loading: false,
+        error: null,
+        isHistorical: subType === "historical",
+        isUpdate: subType === "update",
+      });
+    }
+  }
+
+  /**
+   * 将数据转发给 Market Worker
+   * @param {string} dataType 数据类型
+   * @param {object} data 数据
+   */
+  forwardToWorker(dataType, data) {
+    if (!this.marketPort || !this.workersReady.market) {
+      // Worker 未准备好，跳过
+      return;
+    }
+
+    this.marketPort.postMessage({
+      type: "MARKET_DATA",
+      dataType,
+      data,
+      timestamp: Date.now(),
+    });
   }
 
   /**
@@ -77,7 +253,7 @@ class MarketDataService {
       // 连接订单簿数据流
       this.connectOrderbook(market);
 
-      // 连接K线数据流
+      // 连接 K 线数据流
       this.connectKlines(market, this.currentTimeframe);
 
       return true;
@@ -107,6 +283,9 @@ class MarketDataService {
         // 消息处理函数
         (data) => {
           console.log(`Ticker data for ${market}:`, data);
+
+          // 转发数据到 Worker
+          this.forwardToWorker("ticker", data);
 
           // 通知所有监听器
           this._notifyListeners("ticker", data);
@@ -147,11 +326,17 @@ class MarketDataService {
         // 消息处理函数
         (data) => {
           // 避免过多日志，只在有合理数据时记录
-          if (data.bids.length > 0 || data.asks.length > 0) {
+          if (
+            (data.bids && data.bids.length > 0) ||
+            (data.asks && data.asks.length > 0)
+          ) {
             console.log(
-              `Orderbook data for ${market}, bids: ${data.bids.length}, asks: ${data.asks.length}`,
+              `Orderbook data for ${market}, bids: ${data.bids?.length || 0}, asks: ${data.asks?.length || 0}`,
             );
           }
+
+          // 转发数据到 Worker
+          this.forwardToWorker("orderbook", data);
 
           // 通知所有监听器
           this._notifyListeners("orderbook", data);
@@ -173,7 +358,7 @@ class MarketDataService {
   }
 
   /**
-   * 连接K线数据流
+   * 连接 K 线数据流
    * @param {string} market - 交易对
    * @param {string} timeframe - 时间周期
    */
@@ -188,21 +373,28 @@ class MarketDataService {
       // 更新连接状态
       this._updateConnectionStatus("klines", "connecting");
 
-      // 通知监听器K线数据正在加载
+      // 通知监听器 K 线数据正在加载
       this._notifyListeners("klines", { loading: true, error: null });
 
-      // 先获取历史K线数据
+      // 先获取历史 K 线数据
       this.fetchHistoricalKlines(market, timeframe)
         .then((historicalData) => {
           console.log(`Creating kline stream for ${market} (${timeframe})`);
 
-          // 连接实时K线数据流
+          // 连接实时 K 线数据流
           this.connections.klines = this.adapter.createKlineStream(
             market,
             timeframe,
             // 消息处理函数
             (data) => {
               console.log(`Kline data for ${market} (${timeframe}):`, data);
+
+              // 转发数据到 Worker
+              this.forwardToWorker("klines", {
+                data,
+                timeframe,
+                isUpdate: true,
+              });
 
               // 通知所有监听器
               this._notifyListeners("klines", {
@@ -250,16 +442,23 @@ class MarketDataService {
   }
 
   /**
-   * 获取历史K线数据
+   * 获取历史 K 线数据
    * @param {string} market - 交易对
    * @param {string} timeframe - 时间周期
-   * @returns {Promise<Array>} - K线数据
+   * @returns {Promise<Array>} - K 线数据
    */
   async fetchHistoricalKlines(market, timeframe) {
     try {
       console.log(`Fetching historical klines for ${market} (${timeframe})`);
       const klines = await this.adapter.getKlines(market, timeframe, 100);
       console.log(`Received ${klines.length} historical klines`);
+
+      // 转发历史数据到 Worker
+      this.forwardToWorker("klines", {
+        data: klines,
+        timeframe,
+        isHistorical: true,
+      });
 
       // 通知监听器
       this._notifyListeners("klines", {
@@ -294,6 +493,37 @@ class MarketDataService {
   }
 
   /**
+   * 检查 Worker 健康状态
+   * @returns {Promise<Object>} Worker 状态
+   */
+  async checkWorkersStatus() {
+    return new Promise((resolve) => {
+      if (!this.marketPort) {
+        resolve({ error: "Market worker not initialized" });
+        return;
+      }
+
+      const timeoutId = setTimeout(() => {
+        resolve({ error: "Worker status check timeout" });
+      }, 5000);
+
+      // 设置一次性监听器
+      const listener = (event) => {
+        if (event.data.type === "WORKER_STATUS_RESPONSE") {
+          clearTimeout(timeoutId);
+          this.marketPort.removeEventListener("message", listener);
+          resolve(event.data.status);
+        }
+      };
+
+      this.marketPort.addEventListener("message", listener);
+
+      // 发送状态检查请求
+      this.marketPort.postMessage({ type: "WORKER_STATUS" });
+    });
+  }
+
+  /**
    * 关闭所有连接
    */
   closeAllConnections() {
@@ -320,7 +550,7 @@ class MarketDataService {
       console.log("Fetching available markets");
       const markets = await this.adapter.getMarkets();
 
-      // 过滤只保留USDT交易对
+      // 过滤只保留 USDT 交易对
       const usdtMarkets = markets.filter((market) => market.endsWith("/USDT"));
       console.log(`Received ${usdtMarkets.length} USDT markets`);
 
@@ -333,13 +563,16 @@ class MarketDataService {
 
   /**
    * 添加数据监听器
-   * @param {string} type - 数据类型 (ticker, orderbook, klines, connectionStatus)
+   * @param {string} type - 数据类型 (ticker, orderbook, klines, connectionStatus, processedData)
    * @param {Function} listener - 监听器函数
+   * @returns {Function} 取消监听函数
    */
   addListener(type, listener) {
     if (this.listeners[type]) {
       this.listeners[type].add(listener);
+      return () => this.removeListener(type, listener);
     }
+    return () => {};
   }
 
   /**
@@ -389,8 +622,21 @@ class MarketDataService {
    * 在应用关闭时调用
    */
   terminate() {
-    // 关闭所有WebSocket连接
+    // 关闭所有 WebSocket 连接
     this.closeAllConnections();
+
+    // 终止所有 Worker
+    workerManager.terminateAll();
+
+    // 重置 Worker 状态
+    this.marketWorker = null;
+    this.marketPort = null;
+    this.workersReady = {
+      market: false,
+      ticker: false,
+      orderbook: false,
+      klines: false,
+    };
 
     // 清空所有监听器
     Object.keys(this.listeners).forEach((key) => {

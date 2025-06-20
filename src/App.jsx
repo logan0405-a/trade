@@ -4,6 +4,7 @@ import CssBaseline from "@mui/material/CssBaseline";
 import useThemeStore from "./stores/theme";
 import MainLayout from "./components/MainLayout";
 import "./index.css";
+import WebWorkerTest from "./components/WebWorkerTest";
 
 function App() {
   const { theme } = useThemeStore();
@@ -47,6 +48,7 @@ function App() {
   return (
     <ThemeProvider theme={muiTheme}>
       <CssBaseline />
+      <WebWorkerTest />
       <MainLayout />
     </ThemeProvider>
   );
