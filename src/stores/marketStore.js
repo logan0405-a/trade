@@ -1,4 +1,3 @@
-// src/stores/marketStore.js
 import { create } from "zustand";
 
 // WebSocket 连接状态枚举
